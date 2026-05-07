@@ -1,0 +1,22 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Compiled Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# Environment variables (secrets)
+.env
+
+# macOS
+.DS_Store

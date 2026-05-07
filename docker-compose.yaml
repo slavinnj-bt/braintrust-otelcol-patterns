@@ -1,0 +1,79 @@
+# docker-compose.yaml
+#
+# Runs two containers:
+#
+#   lgtm      — Grafana's all-in-one observability stack (Grafana + Tempo + Loki + Prometheus).
+#               Receives already-processed (redacted, sampled) spans from the collector.
+#               Grafana UI is at http://localhost:3000 (admin/admin).
+#
+#   collector — Standalone OpenTelemetry Collector (otelcol-contrib build).
+#               Receives raw spans from the agent on ports 4317/4318, applies the
+#               processor chain (redaction → sampling → batching), then fans out to
+#               both Braintrust and Grafana.
+#               Collector self-metrics (Prometheus) are exposed at http://localhost:8888/metrics.
+#
+# Data flow:
+#   agent.py ──OTLP HTTP──► collector:4318
+#                               │
+#               ┌───────────────┴──────────────────┐
+#               ▼                                  ▼
+#   api.braintrust.dev/otel           lgtm:4318 (internal Docker network)
+#   (project: braintrust-otelcol-examples)    └──► Tempo / Prometheus / Loki
+#
+# References:
+#   https://grafana.com/docs/opentelemetry/docker-lgtm/
+#   https://opentelemetry.io/docs/collector/architecture/
+
+services:
+  # ── Grafana LGTM stack ──────────────────────────────────────────────────────
+  # grafana/otel-lgtm bundles Grafana, Tempo (traces), Loki (logs), Prometheus
+  # (metrics), and its own internal OTel Collector — all in one image.
+  # We do NOT override its internal collector config; we let it handle routing
+  # from its OTLP receiver to Tempo/Loki/Prometheus on its own.
+  lgtm:
+    image: grafana/otel-lgtm:latest
+    ports:
+      - "3000:3000"   # Grafana web UI
+      - "9090:9090"   # Prometheus (optional direct access)
+      # LGTM's OTLP ports are intentionally NOT mapped to the host.
+      # Only our standalone collector (on the same Docker network) talks to them.
+    environment:
+      # Optional: enable verbose logging per-component for debugging.
+      # ENABLE_LOGS_OTELCOL: "true"
+      # ENABLE_LOGS_TEMPO: "true"
+      ENABLE_LOGS_ALL: "false"
+    volumes:
+      # Mount a directory at /data to persist traces/metrics/logs across restarts.
+      # Omit or comment out for ephemeral (demo) usage.
+      # - lgtm-data:/data
+      []
+
+  # ── Standalone OpenTelemetry Collector ─────────────────────────────────────
+  # otelcol-contrib includes all community processors/exporters, including the
+  # redaction processor and probabilistic sampler we use below.
+  collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    volumes:
+      # Mount our custom config; the image's default config path is overridden
+      # via the `command` flag below.
+      - ./collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    ports:
+      - "4317:4317"   # OTLP gRPC — agent can use this endpoint
+      - "4318:4318"   # OTLP HTTP — agent uses this by default in agent.py
+      - "8888:8888"   # Collector self-metrics (Prometheus format)
+      - "13133:13133" # Health check extension — GET /health
+    environment:
+      # Injected from your .env file so collector.yaml can reference ${BRAINTRUST_API_KEY}.
+      BRAINTRUST_API_KEY: "${BRAINTRUST_API_KEY}"
+    depends_on:
+      - lgtm
+
+# ── Extension stubs ──────────────────────────────────────────────────────────
+# To add another observability backend (e.g. Jaeger, Zipkin, Honeycomb):
+#   1. Add a new service here.
+#   2. Add a corresponding exporter in collector.yaml.
+#   3. Add the exporter to the relevant pipeline in collector.yaml's service section.
+
+# volumes:
+#   lgtm-data:

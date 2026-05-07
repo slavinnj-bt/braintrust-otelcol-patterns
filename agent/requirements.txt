@@ -1,0 +1,21 @@
+# Core dependencies for the Braintrust OTEL Collector example agent.
+#
+# braintrust[otel] — installs the Braintrust SDK together with the full
+#   OpenTelemetry Python SDK (opentelemetry-sdk, opentelemetry-api) and the
+#   OTLP exporters. Using this extra ensures compatible OTel versions.
+#   Ref: https://www.braintrust.dev/docs/integrations/sdk-integrations/opentelemetry#python-sdk-configuration
+braintrust[otel]
+
+# openai-agents — OpenAI Agents SDK for building multi-turn AI agents.
+#   Provides Agent and Runner classes with built-in tracing support.
+#   Runner.run_sync() manages the LLM call loop; result.to_input_list()
+#   returns the full conversation history for the next turn.
+#   Ref: https://openai.github.io/openai-agents-python/
+openai-agents
+
+# OTLP HTTP exporter — sends spans from this process to the collector.
+#   Included transitively by braintrust[otel] but listed explicitly for clarity.
+opentelemetry-exporter-otlp-proto-http
+
+# python-dotenv — loads BRAINTRUST_API_KEY and OPENAI_API_KEY from .env.
+python-dotenv
