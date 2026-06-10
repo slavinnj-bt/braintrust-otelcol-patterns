@@ -21,9 +21,9 @@ LGTM, but Datadog, Honeycomb, etc. work identically — only the exporter block
 changes).
 
 ```mermaid
-%%{init: {"flowchart": {"curve": "linear"}}}%%
+%%{init: {"flowchart": {"curve": "linear"}, "themeVariables": {"fontFamily": "Helvetica Neue, Arial, sans-serif", "lineColor": "#5f6368", "clusterBkg": "#ffffff", "clusterBorder": "#dadce0", "edgeLabelBackground": "#f1f3f4"}}}%%
 flowchart LR
-    subgraph apps["Instrumented applications"]
+    subgraph apps["1 — Emit · Instrumented applications"]
         direction TB
         a1["Agent"]
         a2["Agent"]
@@ -33,7 +33,7 @@ flowchart LR
 
     lb["Load balancer<br/><i>optional — gateway pattern</i>"]
 
-    subgraph col["OpenTelemetry Collector"]
+    subgraph col["2 — Process · OpenTelemetry Collector"]
         direction TB
         subgraph inst1["Collector instance 1"]
             direction LR
@@ -62,39 +62,54 @@ flowchart LR
         colN ~~~ inst1
     end
 
-    bt["Braintrust<br/>DATAPLANE_URL/otel<br/><i>LLM observability & evals</i>"]
-    other["Any OTLP backend<br/><i>Grafana, etc.</i>"]
+    subgraph backends["3 — Export · Observability backends"]
+        direction TB
+        bt["Braintrust<br/>DATAPLANE_URL/otel<br/><i>LLM observability & evals</i>"]
+        other["Any OTLP backend<br/><i>Grafana, etc.</i>"]
+    end
 
-    a1 -- OTLP --> lb
-    a2 -- OTLP --> lb
-    a3 -- OTLP --> lb
-    aN -- OTLP --> lb
-    lb --> recv
+    a1 --> lb
+    a2 --> lb
+    a3 --> lb
+    aN --> lb
+    lb -- "&nbsp;OTLP&nbsp;" --> recv
     lb -.-> recvN
     expN -.-> bt
     expN -.-> other
-    e1 -- "Authorization +<br/>x-bt-parent headers" --> bt
-    e2 -- OTLP --> other
+    e1 -- x-bt-parent --> bt
+    e2 --> other
+
+    %% Bold the primary data path; dotted scale-out edges stay thin
+    linkStyle 0,1,2,3,4,5,9,10,11,12,13,17,18 stroke-width:2px
 
     classDef app fill:#e8f0fe,stroke:#4285f4,color:#1a3c8b
     classDef proc fill:#fef7e0,stroke:#f9ab00,color:#7a4f01
+    classDef hero fill:#feefc3,stroke:#e8710a,stroke-width:2.5px,color:#6a3d00
     classDef io fill:#e6f4ea,stroke:#34a853,color:#1e4620
     classDef backend fill:#fce8e6,stroke:#ea4335,color:#8b1a10
     classDef optional fill:#f1f3f4,stroke:#5f6368,color:#3c4043,stroke-dasharray:6 4
     classDef instance fill:#f8f9fa,stroke:#5f6368,color:#3c4043
     classDef instanceN fill:#f8f9fa,stroke:#5f6368,color:#3c4043,stroke-dasharray:6 4
     class a1,a2,a3,aN app
-    class p1,p2,p3,p4 proc
+    class p1,p4 proc
+    class p2,p3 hero
     class recv,e1,e2 io
     class bt,other backend
     class lb optional
     class inst1 instance
     class colN,recvN,procN,expN instanceN
+
+    style apps fill:#ffffff,stroke:#dadce0
+    style col fill:#fcfcfd,stroke:#80868b
+    style backends fill:#ffffff,stroke:#dadce0
+    style pipe fill:#fffdf7,stroke:#e8d9a8
 ```
 
-> The diagram source also lives standalone at
-> [`docs/architecture.mmd`](docs/architecture.mmd) for sharing and rendering
-> outside this README (see the comments at the top of that file).
+> The diagram source lives standalone at
+> [`docs/architecture.mmd`](docs/architecture.mmd), with pre-rendered copies
+> ready to drop into slides or docs: [`architecture.svg`](docs/architecture.svg),
+> [`architecture.png`](docs/architecture.png) (2x scale, white background), and
+> [`architecture.pdf`](docs/architecture.pdf).
 
 The dashed elements are the [gateway-pattern](https://opentelemetry.io/docs/collector/deploy/gateway/)
 scale-out: in production, applications send to a load balancer fronting
