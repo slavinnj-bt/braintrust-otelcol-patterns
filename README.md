@@ -13,41 +13,133 @@ ripping out their existing infrastructure.
 
 ## Architecture
 
+The diagram below shows the general pattern this repo demonstrates: any number
+of OTel-instrumented applications and LLM agents emit OTLP to a single
+collector, which redacts PII, samples, and fans the surviving spans out to
+Braintrust **and** any other OTLP-compatible backend (this repo ships Grafana
+LGTM, but Datadog, Honeycomb, etc. work identically — only the exporter block
+changes).
+
+```mermaid
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart LR
+    subgraph apps["Instrumented applications"]
+        direction TB
+        a1["Agent"]
+        a2["Agent"]
+        a3["Application / service"]
+        aN["... any OTel-instrumented<br/>workload"]
+    end
+
+    lb["Load balancer<br/><i>optional — gateway pattern</i>"]
+
+    subgraph col["OpenTelemetry Collector"]
+        direction TB
+        subgraph inst1["Collector instance 1"]
+            direction LR
+            recv["OTLP receiver<br/>gRPC :4317 / HTTP :4318"]
+            subgraph pipe["Trace pipeline (processors, in order)"]
+                direction TB
+                p1["1 — memory_limiter<br/><i>protect the collector from OOM</i>"]
+                p2["2 — redaction<br/><i>strip PII before export</i>"]
+                p3["3 — probabilistic_sampler<br/><i>keep N% of traces</i>"]
+                p4["4 — batch<br/><i>group spans for efficient export</i>"]
+                p1 --> p2 --> p3 --> p4
+            end
+            e1["otlphttp exporter<br/><i>Braintrust</i>"]
+            e2["otlphttp exporter<br/><i>second backend</i>"]
+            recv --> pipe
+            pipe --> e1
+            pipe --> e2
+        end
+        subgraph colN["Collector instance N — scaled out behind the load balancer"]
+            direction LR
+            recvN["OTLP receiver"]
+            procN["identical processor pipeline"]
+            expN["otlphttp exporters"]
+            recvN -.-> procN -.-> expN
+        end
+        colN ~~~ inst1
+    end
+
+    bt["Braintrust<br/>DATAPLANE_URL/otel<br/><i>LLM observability & evals</i>"]
+    other["Any OTLP backend<br/><i>Grafana, etc.</i>"]
+
+    a1 -- OTLP --> lb
+    a2 -- OTLP --> lb
+    a3 -- OTLP --> lb
+    aN -- OTLP --> lb
+    lb --> recv
+    lb -.-> recvN
+    expN -.-> bt
+    expN -.-> other
+    e1 -- "Authorization +<br/>x-bt-parent headers" --> bt
+    e2 -- OTLP --> other
+
+    classDef app fill:#e8f0fe,stroke:#4285f4,color:#1a3c8b
+    classDef proc fill:#fef7e0,stroke:#f9ab00,color:#7a4f01
+    classDef io fill:#e6f4ea,stroke:#34a853,color:#1e4620
+    classDef backend fill:#fce8e6,stroke:#ea4335,color:#8b1a10
+    classDef optional fill:#f1f3f4,stroke:#5f6368,color:#3c4043,stroke-dasharray:6 4
+    classDef instance fill:#f8f9fa,stroke:#5f6368,color:#3c4043
+    classDef instanceN fill:#f8f9fa,stroke:#5f6368,color:#3c4043,stroke-dasharray:6 4
+    class a1,a2,a3,aN app
+    class p1,p2,p3,p4 proc
+    class recv,e1,e2 io
+    class bt,other backend
+    class lb optional
+    class inst1 instance
+    class colN,recvN,procN,expN instanceN
 ```
-┌─────────────────────────────────────────────────────┐
-│  agent/agent.py  (Python + OpenAI Agents SDK)       │
-│                                                     │
-│  Python root span  ("banking-support-session")      │
-│      └── turn-N spans (manual OTel)                 │
-│          └── SDK spans (agent run + LLM generation) │
-└──────────────────────┬──────────────────────────────┘
-                       │ OTLP HTTP  (port 4318)
-                       ▼
-┌─────────────────────────────────────────────────────┐
-│  otelcol-contrib  (standalone collector container)  │
-│                                                     │
-│  receivers:  otlp (gRPC 4317, HTTP 4318)            │
-│  processors:                                        │
-│    1. memory_limiter  — prevent OOM                 │
-│    2. redaction       — strip PII from attributes   │
-│    3. probabilistic_sampler  — drop 50% of traces   │
-│    4. batch           — buffer before export        │
-│                                                     │
-│  exporters:  fan-out to both backends               │
-└───────────┬──────────────────────┬──────────────────┘
-            │                      │
-            ▼                      ▼
-  ┌─────────────────┐    ┌────────────────────────────┐
-  │ Braintrust      │    │ Grafana LGTM               │
-  │ api.braintrust. │    │ (grafana/otel-lgtm image)  │
-  │ dev/otel        │    │                            │
-  │                 │    │ Grafana UI  → localhost:3000│
-  │ project:        │    │ Tempo       → traces       │
-  │ braintrust-     │    │ Prometheus  → metrics      │
-  │ otelcol-        │    │ Loki        → logs         │
-  │ examples        │    └────────────────────────────┘
-  └─────────────────┘
-```
+
+> The diagram source also lives standalone at
+> [`docs/architecture.mmd`](docs/architecture.mmd) for sharing and rendering
+> outside this README (see the comments at the top of that file).
+
+The dashed elements are the [gateway-pattern](https://opentelemetry.io/docs/collector/deploy/gateway/)
+scale-out: in production, applications send to a load balancer fronting
+multiple identical collector instances rather than to one sidecar. In this
+repo the applications talk to a single sidecar collector directly, so you can
+mentally delete the dashed boxes — nothing in `collector.yaml` changes either
+way.
+
+**What processors do:** a processor sits between receivers and exporters and
+can transform, filter, enrich, or drop telemetry in flight; they run in
+exactly the order listed in the pipeline. Only two of the four here implement
+this example's headline features — `redaction` (PII) and
+`probabilistic_sampler`. The other two are operational hygiene you should run
+on any production collector: `memory_limiter` refuses new data when the
+collector's own heap approaches its limit so the process doesn't OOM (it must
+be first, before any work is done), and `batch` groups spans into fewer,
+larger export requests (it goes last, so batches are formed only from spans
+that survived sampling). Because every span passes through this chain *before*
+reaching any exporter, both backends receive identically redacted and sampled
+data — there is no path by which raw PII reaches a vendor.
+
+### Deployment pattern: agent (sidecar) vs. gateway
+
+The OpenTelemetry docs describe two standard ways to deploy a collector:
+
+- **[Agent pattern](https://opentelemetry.io/docs/collector/deploy/agent/)** —
+  the collector runs *alongside* the application (sidecar container, DaemonSet,
+  or same host). The SDK sends OTLP to this local collector, which exports to
+  one or more backends. It is straightforward to get started with and gives a
+  clear one-to-one mapping between application and collector.
+- **[Gateway pattern](https://opentelemetry.io/docs/collector/deploy/gateway/)** —
+  applications send telemetry to a single, centrally managed OTLP endpoint
+  (one or more standalone collector instances per cluster/region). This buys
+  centrally managed credentials and centralized policy (filtering, sampling)
+  at the cost of an extra hop and more operational surface.
+
+**This repo uses the agent pattern**: the collector is a sidecar container in
+the same Docker Compose network as the workload. Everything in
+`collector.yaml`, however, is deployment-agnostic — the same pipeline
+(redaction → sampling → fan-out) is exactly what you would centralize in a
+gateway tier. PII redaction and tail-based sampling are in fact *stronger*
+arguments for a gateway in production: the gateway docs specifically call out
+applying "trace sampling policies consistently" and centralized policy
+management as reasons to adopt it, and tail sampling requires all spans of a
+trace to reach the same collector instance.
 
 ### Trace hierarchy (what you see in each backend)
 
@@ -91,7 +183,27 @@ including `redactionprocessor` and `probabilisticsamplerprocessor`. We run this
 as a separate container so our pipeline configuration is completely visible and
 editable in `collector.yaml`, independent of LGTM's internal wiring.
 
-Key collector concepts used here:
+The [OTel component model](https://opentelemetry.io/docs/collector/components/)
+defines five component types, all of which you wire together in `collector.yaml`:
+
+| Component type | Role | Used in this repo |
+|----------------|------|-------------------|
+| **Receivers** | Collect telemetry from various sources and formats | `otlp` (gRPC + HTTP) |
+| **Processors** | Transform, filter, and enrich telemetry between receipt and export | `memory_limiter`, `redaction`, `probabilistic_sampler`, `batch` |
+| **Exporters** | Send telemetry to observability backends | `otlphttp/braintrust`, `otlphttp/grafana` |
+| **Connectors** | Join two pipelines, acting as both exporter and receiver (e.g., derive metrics from spans) | not used — stub in `collector.yaml` |
+| **Extensions** | Capabilities outside the data path, like health checks | `health_check` |
+
+Processors run **in the order listed in the pipeline**, and every exporter only
+sees data that has passed through the full chain. That ordering is what makes
+the PII story work: the `redaction` processor sits between the receiver and the
+exporters, so sensitive attribute values are replaced with `*****` before
+*either* backend — Braintrust or your second vendor — receives a single byte.
+The redaction and sampling processors live in the
+[contrib distribution](https://github.com/open-telemetry/opentelemetry-collector-contrib),
+which is why this repo uses `otelcol-contrib` rather than the core image.
+
+Specific components used here:
 
 | Component | What it does |
 |-----------|-------------|
@@ -128,19 +240,48 @@ backend, use `set_trace_processors()` — see the stub in `agent/agent.py`.
 [[OpenAI Agents SDK tracing]](https://openai.github.io/openai-agents-python/tracing/)  
 [[OpenAI Agents SDK running agents]](https://openai.github.io/openai-agents-python/running_agents/)
 
-### 4. Braintrust OTLP integration
+### 4. Braintrust OTLP integration and trace propagation
 
-The collector exports traces to Braintrust's OTLP ingest endpoint using two
-HTTP headers:
+Braintrust accepts standard OTLP at `<DATAPLANE_URL>/otel`, where
+`DATAPLANE_URL` is your deployment's API URL — for self-hosted/hybrid
+deployments this is your stack's Universal API URL; for SaaS it is
+`https://api.braintrust.dev` (EU: `https://api-eu.braintrust.dev`).
+Two HTTP headers are required on every request,
+and in this repo the collector's `otlphttp/braintrust` exporter attaches them
+so applications never handle Braintrust credentials:
 
 ```
 Authorization: Bearer <BRAINTRUST_API_KEY>
 x-bt-parent: project_name:braintrust-otelcol-examples
 ```
 
-The `x-bt-parent` header tells Braintrust which project to route spans into.
-It accepts `project_id:`, `project_name:`, `experiment_id:`, or a span slug
-for nesting under a specific span.
+The `x-bt-parent` header controls **where in Braintrust the trace lands** —
+it names the parent container for every span in the request. It accepts:
+
+- `project_id:<id>` or `project_name:<name>` — route into a project's logs
+- `experiment_id:<id>` — attach spans to an experiment
+- a span slug from `span.export()` — nest the incoming trace under a specific
+  existing span (distributed tracing across services)
+
+Two propagation rules to keep in mind:
+
+1. **Within a trace**, parent/child structure is ordinary OTel context
+   propagation — `trace_id` and `parent_span_id` on each span. The collector
+   forwards these untouched, so the hierarchy you build in your app (root
+   session span → per-turn spans → LLM spans) appears verbatim in Braintrust.
+2. **Every trace needs a root span.** Braintrust's logs table only shows
+   traces whose root span was ingested (`span_parents` empty). If you sample
+   or filter in the collector, do it per-trace (as the trace-ID-hashing
+   `probabilistic_sampler` here does), not per-span — orphaned child spans
+   won't appear in the UI.
+
+If an app exports to Braintrust **directly** (no collector), the same two
+headers move into standard SDK environment variables instead:
+
+```
+OTEL_EXPORTER_OTLP_ENDPOINT=<DATAPLANE_URL>/otel
+OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer <API key>, x-bt-parent=project_name:braintrust-otelcol-examples"
+```
 
 [[Braintrust OTLP configuration]](https://www.braintrust.dev/docs/integrations/sdk-integrations/opentelemetry#otlp-configuration)
 
@@ -390,5 +531,8 @@ All claims in this example are backed by the following official documentation:
 | Grafana docker-otel-lgtm | https://grafana.com/docs/opentelemetry/docker-lgtm/ |
 | OTel Collector architecture (fan-out) | https://opentelemetry.io/docs/collector/architecture/ |
 | OTel Collector configuration | https://opentelemetry.io/docs/collector/configuration/ |
+| OTel Collector components (receivers/processors/exporters/connectors/extensions) | https://opentelemetry.io/docs/collector/components/ |
+| OTel Collector agent deployment pattern (sidecar) | https://opentelemetry.io/docs/collector/deploy/agent/ |
+| OTel Collector gateway deployment pattern | https://opentelemetry.io/docs/collector/deploy/gateway/ |
 | OTel Redaction Processor | https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/processor/redactionprocessor/README.md |
 | OTel Probabilistic Sampler | https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/processor/probabilisticsamplerprocessor/README.md |

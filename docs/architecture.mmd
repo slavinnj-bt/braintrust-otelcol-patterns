@@ -1,0 +1,74 @@
+%% Braintrust + OTel Collector fan-out architecture
+%% Render: mmdc -i architecture.mmd -o architecture.svg
+%% Or paste into https://mermaid.live
+%% Dashed elements = optional gateway-pattern scale-out
+%% (https://opentelemetry.io/docs/collector/deploy/gateway/)
+%%{init: {"flowchart": {"curve": "linear"}}}%%
+flowchart LR
+    subgraph apps["Instrumented applications"]
+        direction TB
+        a1["Agent"]
+        a2["Agent"]
+        a3["Application / service"]
+        aN["... any OTel-instrumented<br/>workload"]
+    end
+
+    lb["Load balancer<br/><i>optional — gateway pattern</i>"]
+
+    subgraph col["OpenTelemetry Collector"]
+        direction TB
+        subgraph inst1["Collector instance 1"]
+            direction LR
+            recv["OTLP receiver<br/>gRPC :4317 / HTTP :4318"]
+            subgraph pipe["Trace pipeline (processors, in order)"]
+                direction TB
+                p1["1 — memory_limiter<br/><i>protect the collector from OOM</i>"]
+                p2["2 — redaction<br/><i>strip PII before export</i>"]
+                p3["3 — probabilistic_sampler<br/><i>keep N% of traces</i>"]
+                p4["4 — batch<br/><i>group spans for efficient export</i>"]
+                p1 --> p2 --> p3 --> p4
+            end
+            e1["otlphttp exporter<br/><i>Braintrust</i>"]
+            e2["otlphttp exporter<br/><i>second backend</i>"]
+            recv --> pipe
+            pipe --> e1
+            pipe --> e2
+        end
+        subgraph colN["Collector instance N — scaled out behind the load balancer"]
+            direction LR
+            recvN["OTLP receiver"]
+            procN["identical processor pipeline"]
+            expN["otlphttp exporters"]
+            recvN -.-> procN -.-> expN
+        end
+        colN ~~~ inst1
+    end
+
+    bt["Braintrust<br/>DATAPLANE_URL/otel<br/><i>LLM observability & evals</i>"]
+    other["Any OTLP backend<br/><i>Grafana, etc.</i>"]
+
+    a1 -- OTLP --> lb
+    a2 -- OTLP --> lb
+    a3 -- OTLP --> lb
+    aN -- OTLP --> lb
+    lb --> recv
+    lb -.-> recvN
+    expN -.-> bt
+    expN -.-> other
+    e1 -- "Authorization +<br/>x-bt-parent headers" --> bt
+    e2 -- OTLP --> other
+
+    classDef app fill:#e8f0fe,stroke:#4285f4,color:#1a3c8b
+    classDef proc fill:#fef7e0,stroke:#f9ab00,color:#7a4f01
+    classDef io fill:#e6f4ea,stroke:#34a853,color:#1e4620
+    classDef backend fill:#fce8e6,stroke:#ea4335,color:#8b1a10
+    classDef optional fill:#f1f3f4,stroke:#5f6368,color:#3c4043,stroke-dasharray:6 4
+    classDef instance fill:#f8f9fa,stroke:#5f6368,color:#3c4043
+    classDef instanceN fill:#f8f9fa,stroke:#5f6368,color:#3c4043,stroke-dasharray:6 4
+    class a1,a2,a3,aN app
+    class p1,p2,p3,p4 proc
+    class recv,e1,e2 io
+    class bt,other backend
+    class lb optional
+    class inst1 instance
+    class colN,recvN,procN,expN instanceN
