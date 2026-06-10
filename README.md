@@ -415,9 +415,9 @@ docker compose down
    ```yaml
    exporters:
      otlphttp/honeycomb:
-       endpoint: https://api.honeycomb.io
+       endpoint: <your_o11y_backend/ingest_endpoint>
        headers:
-         x-honeycomb-team: "${HONEYCOMB_API_KEY}"
+         x-auth-header: $"{API_KEY}" # backend dependent
    ```
 2. Add the exporter to the relevant pipeline(s) under `service.pipelines`.
 3. Add `HONEYCOMB_API_KEY` to `docker-compose.yaml` environment and your `.env`.
@@ -472,7 +472,7 @@ conversation topic without any other changes required.
 Edit the `model` parameter in the `Agent(...)` constructor in `agent/agent.py`:
 ```python
 agent = Agent(
-    name="Ava",
+    name="My Agent",
     instructions=SYSTEM_PROMPT,
     model="gpt-4o",       # or gpt-4.1, gpt-4.1-mini, etc.
 )
@@ -518,8 +518,6 @@ volumes:
 ---
 
 ## References
-
-All claims in this example are backed by the following official documentation:
 
 | Source | URL |
 |--------|-----|
